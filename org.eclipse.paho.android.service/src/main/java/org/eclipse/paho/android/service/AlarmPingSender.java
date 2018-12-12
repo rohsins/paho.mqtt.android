@@ -14,6 +14,7 @@ package org.eclipse.paho.android.service;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttToken;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.MqttPingSender;
 import org.eclipse.paho.client.mqttv3.internal.ClientComms;
 
@@ -49,6 +50,7 @@ class AlarmPingSender implements MqttPingSender {
 	private BroadcastReceiver alarmReceiver;
 	private AlarmPingSender that;
 	private PendingIntent pendingIntent;
+	private long fKeepalive = 0;
 	private volatile boolean hasStarted = false;
 
 	public AlarmPingSender(MqttService service) {
@@ -77,12 +79,12 @@ class AlarmPingSender implements MqttPingSender {
 				action), PendingIntent.FLAG_UPDATE_CURRENT);
 
 		schedule(comms.getKeepAlive());
+		fKeepalive = ((comms.getKeepAlive() / 10000) * 10000);
 		hasStarted = true;
 	}
 
 	@Override
 	public void stop() {
-
 		Log.d(TAG, "Unregister alarmreceiver to MqttService"+comms.getClient().getClientId());
 		if(hasStarted){
 			if(pendingIntent != null){
@@ -103,19 +105,21 @@ class AlarmPingSender implements MqttPingSender {
 	@Override
 	public void schedule(long delayInMilliseconds) {
 		long nextAlarmInMilliseconds = System.currentTimeMillis()
-				+ delayInMilliseconds;
-		Log.d(TAG, "Schedule next alarm at " + nextAlarmInMilliseconds);
+				+ 10000;
+//		Log.d(TAG, "Schedule next alarm at " + nextAlarmInMilliseconds);
 		AlarmManager alarmManager = (AlarmManager) service
 				.getSystemService(Service.ALARM_SERVICE);
 
         if(Build.VERSION.SDK_INT >= 23){
 			// In SDK 23 and above, dosing will prevent setExact, setExactAndAllowWhileIdle will force
 			// the device to run this task whilst dosing.
-			Log.d(TAG, "Alarm scheule using setExactAndAllowWhileIdle, next: " + delayInMilliseconds);
+//			Log.d(TAG, "Alarm scheule using setExactAndAllowWhileIdle, next: " + delayInMilliseconds);
+			Log.d(TAG, "Alarm scheule using setExactAndAllowWhileIdle, next: " + fKeepalive);
 			alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextAlarmInMilliseconds,
 					pendingIntent);
 		} else if (Build.VERSION.SDK_INT >= 19) {
-			Log.d(TAG, "Alarm scheule using setExact, delay: " + delayInMilliseconds);
+//			Log.d(TAG, "Alarm scheule using setExact, delay: " + delayInMilliseconds);
+			Log.d(TAG, "Alarm scheule using setExact, delay: " + fKeepalive);
 			alarmManager.setExact(AlarmManager.RTC_WAKEUP, nextAlarmInMilliseconds,
 					pendingIntent);
 		} else {
@@ -129,6 +133,7 @@ class AlarmPingSender implements MqttPingSender {
 	 */
 	class AlarmReceiver extends BroadcastReceiver {
 		private WakeLock wakelock;
+		private long pingThreshold = 0;
 		private final String wakeLockTag = MqttServiceConstants.PING_WAKELOCK
 				+ that.comms.getClient().getClientId();
 
@@ -151,28 +156,43 @@ class AlarmPingSender implements MqttPingSender {
 			// Assign new callback to token to execute code after PingResq
 			// arrives. Get another wakelock even receiver already has one,
 			// release it until ping response returns.
-			IMqttToken token = comms.checkForActivity(new IMqttActionListener() {
+//			IMqttToken token = comms.checkForActivity(new IMqttActionListener() {
+//
+//				@Override
+//				public void onSuccess(IMqttToken asyncActionToken) {
+//					Log.d(TAG, "Success. Release lock(" + wakeLockTag + "):"
+//							+ System.currentTimeMillis());
+//					//Release wakelock when it is done.
+//					wakelock.release();
+//				}
+//
+//				@Override
+//				public void onFailure(IMqttToken asyncActionToken,
+//									  Throwable exception) {
+//					Log.d(TAG, "Failure. Release lock(" + wakeLockTag + "):"
+//							+ System.currentTimeMillis());
+//					//Release wakelock when it is done.
+//					wakelock.release();
+//				}
+//			});
 
-				@Override
-				public void onSuccess(IMqttToken asyncActionToken) {
-					Log.d(TAG, "Success. Release lock(" + wakeLockTag + "):"
-							+ System.currentTimeMillis());
-					//Release wakelock when it is done.
-					wakelock.release();
+			if (System.currentTimeMillis() > pingThreshold) {
+				try {
+					MqttMessage mqttMsg = new MqttMessage();
+					mqttMsg.setQos(0);
+					mqttMsg.clearPayload();
+					mqttMsg.setPayload("".getBytes());
+					comms.getClient().publish(" ", mqttMsg);
+					pingThreshold = System.currentTimeMillis() + fKeepalive;
+					Log.d(TAG, "Customized PING packet sent");
+
+				} catch (Exception e) {
+					e.printStackTrace();
 				}
-
-				@Override
-				public void onFailure(IMqttToken asyncActionToken,
-									  Throwable exception) {
-					Log.d(TAG, "Failure. Release lock(" + wakeLockTag + "):"
-							+ System.currentTimeMillis());
-					//Release wakelock when it is done.
-					wakelock.release();
-				}
-			});
-
-
-			if (token == null && wakelock.isHeld()) {
+			}
+			schedule(10000);
+//			if (token == null && wakelock.isHeld()) {
+			if (wakelock.isHeld()) {
 				wakelock.release();
 			}
 		}
